@@ -1,0 +1,111 @@
+name: APatch Installer for Samsung
+
+on:
+  workflow_dispatch:
+    inputs:
+      superkey:
+        description: 'APatch Super Key'
+        required: true
+        type: string
+      boot_image:
+        description: 'Boot image filename (must be in repository)'
+        required: true
+        type: string
+        default: 'boot.img'
+
+jobs:
+  apatch-installer:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up environment
+      run: |
+        sudo apt update -y
+        sudo apt install lz4 openssl python3 python-is-python3 -y
+        chmod +x bin/*
+        
+    - name: Create workspace
+      run: mkdir -p workspace kpatch
+
+    - name: Extract boot image (if compressed)
+      run: |
+        if [ -f "${{ inputs.boot_image }}.lz4" ]; then
+          lz4 -B6 --content-size -f "${{ inputs.boot_image }}.lz4" "${{ inputs.boot_image }}"
+        fi
+        
+        if [ ! -f "${{ inputs.boot_image }}" ]; then
+          echo "::error::Boot image not found!"
+          exit 1
+        fi
+
+    - name: Copy boot image to workspace
+      run: cp "${{ inputs.boot_image }}" workspace/
+
+    - name: Generate signing key
+      run: |
+        cd workspace
+        openssl genrsa -f4 -out sign.pem 4096
+
+    - name: Unpack boot image
+      run: |
+        cd workspace
+        ./../bin/magiskboot unpack boot.img
+
+    - name: Patch Samsung RKP
+      run: |
+        cd workspace
+        ./../bin/magiskboot hexpatch kernel 49010054011440B93FA00F71E9000054010840B93FA00F7189000054001840B91FA00F7188010054 A1020054011440B93FA00F7140020054010840B93FA00F71E0010054001840B91FA00F7181010054
+        ./../bin/magiskboot hexpatch kernel 290E0054011440B93FA00F71C90D0054010840B93FA00F71690D0054001840B91FA00F71090D0054 41030054011440B93FA00F71E0020054010840B93FA00F7180020054001840B91FA00F7120020054
+
+    - name: Patch Samsung DEFEX
+      run: |
+        cd workspace
+        ./../bin/magiskboot hexpatch kernel 821B8012 E2FF8F12
+        ./../bin/magiskboot hexpatch kernel 736B69705F696E697472616D667300 77616E745F696E697472616D667300
+
+    - name: Move kernel for patching
+      run: mv workspace/kernel kpatch/
+
+    - name: Apply APatch kernel patch
+      run: |
+        cd kpatch
+        ../bin/kptools-linux -p -i kernel -k ../bin/kpimg-android -s "${{ inputs.superkey }}" -o image-patched
+        
+        if [ ! -f "image-patched" ]; then
+          echo "::error::Kernel patch failed!"
+          exit 1
+        fi
+
+    - name: Move patched kernel back
+      run: |
+        mv kpatch/image-patched workspace/kernel
+        rm -rf kpatch/
+
+    - name: Repack boot image
+      run: |
+        cd workspace
+        ./../bin/magiskboot repack boot.img
+
+    - name: Sign boot image
+      run: |
+        cd workspace
+        python3 ../bin/avbtool extract_public_key --key sign.pem --output sign.pub.bin
+        python3 ../bin/avbtool add_hash_footer --partition_name boot --partition_size $(wc -c new-boot.img | cut -f 1 -d ' ') --image new-boot.img --key sign.pem --algorithm SHA256_RSA4096
+
+    - name: Move final image
+      run: |
+        mv workspace/new-boot.img boot-patched.img
+
+    - name: Upload patched boot image
+      uses: actions/upload-artifact@v4
+      with:
+        name: patched-boot-image
+        path: boot-patched.img
+
+    - name: Cleanup
+      run: rm -rf workspace/ kpatch/
