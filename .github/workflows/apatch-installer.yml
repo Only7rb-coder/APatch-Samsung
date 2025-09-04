@@ -11,7 +11,7 @@ on:
         description: 'MediaFire download URL'
         required: true
         type: string
-        default: 'https://www.mediafire.com/file/ensi134me534rah/boot.img/file'
+        default: 'https://www.mediafire.com/file/example/boot.img/file'
 
 jobs:
   apatch-installer:
@@ -26,36 +26,141 @@ jobs:
     - name: Set up environment
       run: |
         sudo apt update -y
-        sudo apt install lz4 openssl python3 python-is-python3 wget -y
+        sudo apt install lz4 openssl python3 python3-pip python-is-python3 wget curl -y
+        pip install requests
         chmod +x bin/*
         
     - name: Download from MediaFire
       run: |
-        # Install mediafire-downloader
-        pip install mediafire-downloader
+        # Create Python script for MediaFire download
+        cat > mediafire_download.py << 'EOF'
+        import requests
+        import re
+        import sys
+        import os
         
-        # Download from MediaFire
-        mediafire-downloader "${{ inputs.mediafire_url }}"
+        def download_mediafire(url, output_path="boot.img"):
+            try:
+                session = requests.Session()
+                session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
+                
+                # Get the initial page
+                print(f"Fetching: {url}")
+                response = session.get(url)
+                response.raise_for_status()
+                
+                # Try to find the direct download link using multiple patterns
+                patterns = [
+                    r'aria-label="Download file"\s+href="([^"]+)"',
+                    r'id="downloadButton"\s+href="([^"]+)"',
+                    r'class="download_link"[^>]+href="([^"]+)"',
+                    r'https?://download\d+\.mediafire\.com/[^\'"\s<>]+',
+                    r'kNO\s*=\s*"([^"]+)"',
+                ]
+                
+                download_url = None
+                for pattern in patterns:
+                    matches = re.findall(pattern, response.text, re.IGNORECASE)
+                    if matches:
+                        download_url = matches[0]
+                        print(f"Found download URL with pattern: {download_url}")
+                        break
+                
+                if not download_url:
+                    # Try to extract from JavaScript variables
+                    js_patterns = [
+                        r'var\s+downloadUrl\s*=\s*["\']([^"\']+)["\']',
+                        r'downloadUrl\s*:\s*["\']([^"\']+)["\']',
+                    ]
+                    for pattern in js_patterns:
+                        matches = re.findall(pattern, response.text, re.IGNORECASE)
+                        if matches:
+                            download_url = matches[0]
+                            print(f"Found download URL in JS: {download_url}")
+                            break
+                
+                if not download_url:
+                    print("Could not find download URL in page content")
+                    print("Trying common MediaFire URL patterns...")
+                    # Try to construct download URL from file ID
+                    file_id_match = re.search(r'file/([a-z0-9]+)', url)
+                    if file_id_match:
+                        file_id = file_id_match.group(1)
+                        download_url = f"https://download.mediafire.com/{file_id}"
+                        print(f"Trying constructed URL: {download_url}")
+                
+                if not download_url:
+                    print("Page content for debugging:")
+                    print(response.text[:1000])
+                    return False
+                
+                # Download the file
+                print(f"Downloading from: {download_url}")
+                response = session.get(download_url, stream=True)
+                response.raise_for_status()
+                
+                # Get filename from Content-Disposition or URL
+                filename = output_path
+                if 'content-disposition' in response.headers:
+                    cd = response.headers['content-disposition']
+                    filename_match = re.search(r'filename="([^"]+)"', cd)
+                    if filename_match:
+                        filename = filename_match.group(1)
+                
+                # Save the file
+                print(f"Saving as: {filename}")
+                with open(filename, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                
+                print(f"Download completed: {filename}")
+                return True
+                
+            except Exception as e:
+                print(f"Error downloading file: {e}")
+                return False
         
-        # Check if download was successful and find the downloaded file
-        DOWNLOADED_FILE=$(find . -name "*.img" -o -name "*.lz4" -o -name "*.bin" | head -1)
+        if __name__ == "__main__":
+            if len(sys.argv) < 2:
+                print("Usage: python mediafire_download.py <url> [output]")
+                sys.exit(1)
+            
+            url = sys.argv[1]
+            output = sys.argv[2] if len(sys.argv) > 2 else "boot.img"
+            success = download_mediafire(url, output)
+            sys.exit(0 if success else 1)
+        EOF
         
-        if [ -z "$DOWNLOADED_FILE" ]; then
-          echo "::error::Failed to download file from MediaFire or no supported file found"
+        # Run the download script
+        python mediafire_download.py "${{ inputs.mediafire_url }}" boot.img
+        
+        # If Python method fails, try wget with direct URL pattern
+        if [ ! -f "boot.img" ]; then
+          echo "Python method failed, trying alternative approach..."
+          
+          # Extract file ID from URL
+          FILE_ID=$(echo "${{ inputs.mediafire_url }}" | grep -o 'file/[a-zA-Z0-9]\{11\}' | cut -d'/' -f2)
+          
+          if [ -n "$FILE_ID" ]; then
+            echo "Trying direct download with file ID: $FILE_ID"
+            wget -O boot.img "https://download.mediafire.com/$FILE_ID" || true
+          fi
+        fi
+        
+        # Check if download was successful
+        if [ ! -f "boot.img" ]; then
+          echo "::error::Failed to download boot image from MediaFire"
+          echo "Please check:"
+          echo "1. The MediaFire URL is correct and public"
+          echo "2. The file is not password protected"
+          echo "3. Try using a direct download link instead"
           exit 1
         fi
         
-        # Rename to boot.img if it's an img file, otherwise keep original name
-        if [[ "$DOWNLOADED_FILE" == *.img ]]; then
-          mv "$DOWNLOADED_FILE" boot.img
-          echo "Downloaded and renamed to boot.img"
-        elif [[ "$DOWNLOADED_FILE" == *.lz4 ]]; then
-          mv "$DOWNLOADED_FILE" boot.img.lz4
-          echo "Downloaded boot.img.lz4"
-        else
-          echo "::error::Unsupported file format: $DOWNLOADED_FILE"
-          exit 1
-        fi
+        echo "Download successful! File size: $(du -h boot.img | cut -f1)"
 
     - name: Create workspace
       run: mkdir -p workspace kpatch
@@ -136,4 +241,4 @@ jobs:
         path: boot-patched.img
 
     - name: Cleanup
-      run: rm -rf workspace/ kpatch/ boot.img boot.img.lz4
+      run: rm -rf workspace/ kpatch/ boot.img boot.img.lz4 mediafire_download.py
