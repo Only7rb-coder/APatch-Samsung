@@ -7,11 +7,11 @@ on:
         description: 'APatch Super Key'
         required: true
         type: string
-      boot_image:
-        description: 'Boot image filename (must be in repository)'
+      mediafire_url:
+        description: 'MediaFire download URL'
         required: true
         type: string
-        default: 'boot.img'
+        default: 'https://www.mediafire.com/file/ensi134me534rah/boot.img/file'
 
 jobs:
   apatch-installer:
@@ -26,25 +26,53 @@ jobs:
     - name: Set up environment
       run: |
         sudo apt update -y
-        sudo apt install lz4 openssl python3 python-is-python3 -y
+        sudo apt install lz4 openssl python3 python-is-python3 wget -y
         chmod +x bin/*
         
+    - name: Download from MediaFire
+      run: |
+        # Install mediafire-downloader
+        pip install mediafire-downloader
+        
+        # Download from MediaFire
+        mediafire-downloader "${{ inputs.mediafire_url }}"
+        
+        # Check if download was successful and find the downloaded file
+        DOWNLOADED_FILE=$(find . -name "*.img" -o -name "*.lz4" -o -name "*.bin" | head -1)
+        
+        if [ -z "$DOWNLOADED_FILE" ]; then
+          echo "::error::Failed to download file from MediaFire or no supported file found"
+          exit 1
+        fi
+        
+        # Rename to boot.img if it's an img file, otherwise keep original name
+        if [[ "$DOWNLOADED_FILE" == *.img ]]; then
+          mv "$DOWNLOADED_FILE" boot.img
+          echo "Downloaded and renamed to boot.img"
+        elif [[ "$DOWNLOADED_FILE" == *.lz4 ]]; then
+          mv "$DOWNLOADED_FILE" boot.img.lz4
+          echo "Downloaded boot.img.lz4"
+        else
+          echo "::error::Unsupported file format: $DOWNLOADED_FILE"
+          exit 1
+        fi
+
     - name: Create workspace
       run: mkdir -p workspace kpatch
 
     - name: Extract boot image (if compressed)
       run: |
-        if [ -f "${{ inputs.boot_image }}.lz4" ]; then
-          lz4 -B6 --content-size -f "${{ inputs.boot_image }}.lz4" "${{ inputs.boot_image }}"
+        if [ -f "boot.img.lz4" ]; then
+          lz4 -B6 --content-size -f "boot.img.lz4" "boot.img"
         fi
         
-        if [ ! -f "${{ inputs.boot_image }}" ]; then
-          echo "::error::Boot image not found!"
+        if [ ! -f "boot.img" ]; then
+          echo "::error::Boot image not found after download and extraction!"
           exit 1
         fi
 
     - name: Copy boot image to workspace
-      run: cp "${{ inputs.boot_image }}" workspace/
+      run: cp "boot.img" workspace/
 
     - name: Generate signing key
       run: |
@@ -54,19 +82,19 @@ jobs:
     - name: Unpack boot image
       run: |
         cd workspace
-        ./../bin/magiskboot unpack boot.img
+        ../bin/magiskboot unpack boot.img
 
     - name: Patch Samsung RKP
       run: |
         cd workspace
-        ./../bin/magiskboot hexpatch kernel 49010054011440B93FA00F71E9000054010840B93FA00F7189000054001840B91FA00F7188010054 A1020054011440B93FA00F7140020054010840B93FA00F71E0010054001840B91FA00F7181010054
-        ./../bin/magiskboot hexpatch kernel 290E0054011440B93FA00F71C90D0054010840B93FA00F71690D0054001840B91FA00F71090D0054 41030054011440B93FA00F71E0020054010840B93FA00F7180020054001840B91FA00F7120020054
+        ../bin/magiskboot hexpatch kernel 49010054011440B93FA00F71E9000054010840B93FA00F7189000054001840B91FA00F7188010054 A1020054011440B93FA00F7140020054010840B93FA00F71E0010054001840B91FA00F7181010054
+        ../bin/magiskboot hexpatch kernel 290E0054011440B93FA00F71C90D0054010840B93FA00F71690D0054001840B91FA00F71090D0054 41030054011440B93FA00F71E0020054010840B93FA00F7180020054001840B91FA00F7120020054
 
     - name: Patch Samsung DEFEX
       run: |
         cd workspace
-        ./../bin/magiskboot hexpatch kernel 821B8012 E2FF8F12
-        ./../bin/magiskboot hexpatch kernel 736B69705F696E697472616D667300 77616E745F696E697472616D667300
+        ../bin/magiskboot hexpatch kernel 821B8012 E2FF8F12
+        ../bin/magiskboot hexpatch kernel 736B69705F696E697472616D667300 77616E745F696E697472616D667300
 
     - name: Move kernel for patching
       run: mv workspace/kernel kpatch/
@@ -89,7 +117,7 @@ jobs:
     - name: Repack boot image
       run: |
         cd workspace
-        ./../bin/magiskboot repack boot.img
+        ../bin/magiskboot repack boot.img
 
     - name: Sign boot image
       run: |
@@ -108,4 +136,4 @@ jobs:
         path: boot-patched.img
 
     - name: Cleanup
-      run: rm -rf workspace/ kpatch/
+      run: rm -rf workspace/ kpatch/ boot.img boot.img.lz4
